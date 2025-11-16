@@ -18,24 +18,46 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install dependencies for CI (pytest/jq)
         run: |
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install pytest jq || true
 
       - name: Build Docker image
-        run: |
-          docker build -t hello-service:ci .
+        run: docker build -t hello-service:ci .
 
-      - name: Run container (smoke test)
+      - name: Run container and wait for readiness (robust)
         run: |
-          docker run -d --name hello-ci -p 5000:5000 hello-service:ci
-          sleep 3
-          curl -f http://127.0.0.1:5000/ | jq .
-        env:
-          CI: true
+          # start container
+          CID=$(docker run -d --name hello-ci -p 5000:5000 hello-service:ci)
+          echo "Started container $CID"
+          # wait for service with retries
+          echo "Waiting up to 30s for http://127.0.0.1:5000/ ..."
+          ATTEMPTS=0
+          MAX=30
+          until curl -sSf http://127.0.0.1:5000/ >/dev/null 2>&1; do
+            ATTEMPTS=$((ATTEMPTS+1))
+            echo "Attempt $ATTEMPTS/$MAX - not ready yet"
+            if [ "$ATTEMPTS" -ge "$MAX" ]; then
+              echo "Service failed to start within ${MAX}s. Dumping diagnostics..."
+              echo "=== CONTAINER LOGS ==="
+              docker logs hello-ci || true
+              echo "=== DOCKER PS -a ==="
+              docker ps -a || true
+              echo "=== DOCKER INSPECT ==="
+              docker inspect --format '{{json .State}}' hello-ci || true
+              docker stop hello-ci || true
+              docker rm hello-ci || true
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "Service is ready. Hitting endpoint..."
+          curl -sS http://127.0.0.1:5000/ | jq .
 
       - name: Cleanup
         run: |
           docker stop hello-ci || true
           docker rm hello-ci || true
+
